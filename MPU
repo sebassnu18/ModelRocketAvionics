@@ -1,0 +1,112 @@
+// This code gives you the 3 accelerations and 3 gyroscope values from the MPU sensor. The temp data is not retrieved. 
+
+
+#include <Wire.h>
+
+const int MPU = 0x68;
+int16_t rawAcX, rawAcY, rawAcZ, rawGyX, rawGyY, rawGyZ;
+float biasX = 0.0, biasY = 0.0, biasZ = 0.0;
+float calibratedAcX, calibratedAcY, calibratedAcZ, calibratedGyX, calibratedGyY, calibratedGyZ;
+float accelerationX, accelerationY, accelerationZ;
+float gyroX, gyroY, gyroZ;
+
+void setup() {
+  Wire.begin();
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+  Serial.begin(9600);
+  calibrateSensors();
+}
+
+void loop() {
+  readSensors();
+  calibrateValues();
+  scaleAndConvert();
+  displayData();
+  delay(500);
+}
+
+void calibrateSensors() {
+  int numCalibrationSamples = 1000;  // Adjust this based on desired calibration accuracy
+
+  for (int i = 0; i < numCalibrationSamples; i++) {
+    Wire.beginTransmission(MPU);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU, 14, true);
+    rawAcX = Wire.read() << 8 | Wire.read();
+    rawAcY = Wire.read() << 8 | Wire.read();
+    rawAcZ = Wire.read() << 8 | Wire.read();
+    Wire.read(); // Skip temperature
+    Wire.read(); // Skip temperature
+    rawGyX = Wire.read() << 8 | Wire.read();
+    rawGyY = Wire.read() << 8 | Wire.read();
+    rawGyZ = Wire.read() << 8 | Wire.read();
+
+    biasX += rawAcX;
+    biasY += rawAcY;
+    biasZ += rawAcZ;
+    delay(10);  // Adjust delay if necessary for stability
+  }
+
+  biasX /= numCalibrationSamples;
+  biasY /= numCalibrationSamples;
+  biasZ /= numCalibrationSamples;
+}
+
+void readSensors() {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU, 14, true);
+  rawAcX = Wire.read() << 8 | Wire.read();
+  rawAcY = Wire.read() << 8 | Wire.read();
+  rawAcZ = Wire.read() << 8 | Wire.read();
+  Wire.read(); // Skip temperature
+  Wire.read(); // Skip temperature
+  rawGyX = Wire.read() << 8 | Wire.read();
+  rawGyY = Wire.read() << 8 | Wire.read();
+  rawGyZ = Wire.read() << 8 | Wire.read();
+}
+
+void calibrateValues() {
+  calibratedAcX = rawAcX - biasX;
+  calibratedAcY = rawAcY - biasY;
+  calibratedAcZ = rawAcZ - biasZ;
+  calibratedGyX = rawGyX;
+  calibratedGyY = rawGyY;
+  calibratedGyZ = rawGyZ;
+}
+
+void scaleAndConvert() {
+  float accelSensitivity = 2.0 / 32767.0;  // Assuming ±2g full-scale range
+  float gyroSensitivity = 250.0 / 32767.0; // Assuming ±250°/s full-scale range
+  accelerationX = calibratedAcX * accelSensitivity * 9.81;
+  accelerationY = calibratedAcY * accelSensitivity * 9.81;
+  accelerationZ = calibratedAcZ * accelSensitivity * 9.81;
+  gyroX = calibratedGyX * gyroSensitivity;
+  gyroY = calibratedGyY * gyroSensitivity;
+  gyroZ = calibratedGyZ * gyroSensitivity;
+}
+
+void displayData() {
+ // Serial.print("Acceleration (m/s²): ");
+  Serial.print("Xa = ");
+  Serial.print(accelerationX);
+  Serial.print(" | Ya = ");
+  Serial.print(accelerationY);
+  Serial.print(" | Za = ");
+  Serial.println(accelerationZ);
+
+  //Serial.print("Gyroscope (°/s): ");
+  Serial.print("Xg = ");
+  Serial.print(gyroX);
+  Serial.print(" | Yg = ");
+  Serial.print(gyroY);
+  Serial.print(" | Zg = ");
+  Serial.println(gyroZ);
+
+  Serial.println();
+}
