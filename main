@@ -1,0 +1,251 @@
+// include relevant libraries
+#include <SD.h>
+#include <Wire.h>
+#include <RTClib.h>
+
+// define led pins
+const int red = 8; const int green = 9;
+// push button pin
+const int buttonPin = 10;
+// flag to indicate if recording has started
+bool recordingStarted = false; 
+
+// define I2C address of MPU and initialize variables
+const int MPU = 0x68;
+int16_t rawAcX, rawAcY, rawAcZ, rawGyX, rawGyY, rawGyZ;
+float biasX = 0.0, biasY = 0.0, biasZ = 0.0;
+float calibratedAcX, calibratedAcY, calibratedAcZ, calibratedGyX, calibratedGyY, calibratedGyZ;
+float accelerationX, accelerationY, accelerationZ;
+float gyroX, gyroY, gyroZ;
+
+
+// initialize RTC (create an object RTC) & create file 
+RTC_DS1307 RTC;
+File myFile;
+
+void setup() {
+  // put your setup code here, to run once:
+  // set button pin as input 
+  pinMode(buttonPin, INPUT); 
+  // set up leds
+  pinMode(red,OUTPUT);
+  pinMode(green,OUTPUT);
+  // indicate that system is not ready yet
+  digitalWrite(red,HIGH);
+  digitalWrite(green,LOW);
+  // Initialize I2C communication
+  Wire.begin(); 
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B); // power management register
+  Wire.write(0); // wake up mpu (set sleep mode to 0)
+  Wire.endTransmission(true);
+  calibrateSensors(); // calibrate sensors
+
+// initialize serial connection & wait for serial port to connect.
+ Serial.begin(9600);  
+ while (!Serial) {;} 
+// initialize SD card
+Serial.print("Initializing SD card...");
+ 
+  if (!SD.begin(4)) {
+    Serial.println("initialization failed!");
+    while (1); // stops program if sd can't be initialized
+  }
+  
+  Serial.println("initialization done.");
+
+// creates a new data file if one does not already exist
+  if (not SD.exists("telemetry.txt")) {
+    myFile = SD.open("telemetry.txt", FILE_WRITE);
+    myFile.print(
+      "DATE (dd/mm/yyyy), TIME (hh:mm), Xa (m/s^2), Ya (m/s^2), Za (m/s^2), Xg (°/s), Yg (°/s), Zg (°/s)"
+      );
+      myFile.println();
+      myFile.close();
+  }
+  
+  // initialize RTC
+Serial.print("Initializing RTC...");
+RTC.begin();
+
+// Check to see if the RTC is keeping time.  
+  if (! RTC.isrunning()) {
+    Serial.println("RTC is NOT running!");
+ // Sets the RTC to the time that this sketch was compiled 
+    RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+Serial.println("initialization done.");
+  // When time needs to be re-set on a previously configured device, the
+  // following line sets the RTC to the date & time this sketch was compiled
+  RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  // signal that the setup is done ant code will run as soon as pushbutton is pressed
+  Serial.println("Set up is ready. Code will run after button is pressed");
+      
+  
+}
+
+void loop() {
+  // put your main code here, to run repeatedly:
+
+// Wait for the button press to start recording
+  while (!recordingStarted) {
+    if (digitalRead(buttonPin) == HIGH) {
+        recordingStarted = true; // set the recording flag to true
+        delay(100); // debounce delay
+        }
+  } 
+  // indicate that system working
+  digitalWrite(red,LOW);
+  digitalWrite(green,HIGH);
+  readSensors(); // read sensor data
+  calibrateValues(); // calibrate sensor readings
+  scaleAndConvert(); // scale and convert sensor values
+  displayData(); // display sensor values and time
+  save(); // save data to sd card
+  delay(200);
+ 
+}
+
+void calibrateSensors() {
+  int numCalibrationSamples = 1000;  // number of calibration samples
+
+  for (int i = 0; i < numCalibrationSamples; i++) {
+    Wire.beginTransmission(MPU);
+    Wire.write(0x3B); // starting register of accelerometer data
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU, 14, true); // request accelerometer & gyroscope data
+    // raw accelerometer readings
+    rawAcX = Wire.read() << 8 | Wire.read();
+    rawAcY = Wire.read() << 8 | Wire.read();
+    rawAcZ = Wire.read() << 8 | Wire.read();
+    Wire.read(); // skip temp data
+    Wire.read(); // skip temp data
+    // raw gyroscope readings
+    rawGyX = Wire.read() << 8 | Wire.read();
+    rawGyY = Wire.read() << 8 | Wire.read();
+    rawGyZ = Wire.read() << 8 | Wire.read();
+
+    biasX += rawAcX;
+    biasY += rawAcY;
+    biasZ += rawAcZ;
+    delay(10);  // delay between samples for stability
+  }
+
+  biasX /= numCalibrationSamples;
+  biasY /= numCalibrationSamples;
+  biasZ /= numCalibrationSamples;
+}
+
+void readSensors() {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B); // starting register of accelerometer data
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU, 14, true); // request accelerometer and gyroscope data
+  // accelerometer raw data
+  rawAcX = Wire.read() << 8 | Wire.read();
+  rawAcY = Wire.read() << 8 | Wire.read();
+  rawAcZ = Wire.read() << 8 | Wire.read();
+  Wire.read(); // skip temp
+  Wire.read(); // skip temp
+  // gyroscope raw data
+  rawGyX = Wire.read() << 8 | Wire.read();
+  rawGyY = Wire.read() << 8 | Wire.read();
+  rawGyZ = Wire.read() << 8 | Wire.read();
+}
+
+void calibrateValues() {
+  calibratedAcX = rawAcX - biasX;
+  calibratedAcY = rawAcY - biasY;
+  calibratedAcZ = rawAcZ - biasZ;
+  calibratedGyX = rawGyX;
+  calibratedGyY = rawGyY;
+  calibratedGyZ = rawGyZ;
+}
+
+void scaleAndConvert() {
+  float accelSensitivity = 2.0 / 32767.0;  // assuming ±4g full-scale range (8192 LSB/g, low res)
+  float gyroSensitivity = 250.0 / 32767.0; // assuming ±250°/s full-scale range
+  // converting to m/s²
+  accelerationX = calibratedAcX * accelSensitivity * 9.81;
+  accelerationY = calibratedAcY * accelSensitivity * 9.81;
+  accelerationZ = calibratedAcZ * accelSensitivity * 9.81;
+  // converting to °/s
+  gyroX = calibratedGyX * gyroSensitivity;
+  gyroY = calibratedGyY * gyroSensitivity;
+  gyroZ = calibratedGyZ * gyroSensitivity;
+}
+
+void displayData() {
+  //query the RTC for the current time; saves date/time
+  DateTime now = RTC.now(); 
+ //writes the current date, time, to the serial monitor 
+  Serial.print(now.day(), DEC);
+  Serial.print('/');
+  Serial.print(now.month(), DEC);
+  Serial.print('/');
+  Serial.print(now.year(), DEC);
+  Serial.print(',');
+  Serial.print(' ');
+  Serial.print(now.hour(), DEC);
+  Serial.print(':');
+  //inserts a 0 before minutes from 1-9 so that the time displays correctly, ie 12:05 instead of 12:5 
+  if (now.minute()<10) {
+    Serial.print('0');
+    Serial.print(now.minute(), DEC);
+  }
+  else {
+    Serial.print(now.minute(), DEC);
+  }
+ // Serial.print("Acceleration (m/s²): ");
+  Serial.print(", Xa = ");
+  Serial.print(accelerationX);
+  Serial.print(", Ya = ");
+  Serial.print(accelerationY);
+  Serial.print(", Za = ");
+  Serial.print(accelerationZ);
+
+  //Serial.print("Gyroscope (°/s): ");
+  Serial.print(", Xg = ");
+  Serial.print(gyroX);
+  Serial.print(", Yg = ");
+  Serial.print(gyroY);
+  Serial.print(", Zg = ");
+  Serial.println(gyroZ);
+  
+  Serial.println(rawAcX);
+}
+
+void save() {
+  //query the RTC for the current time; saves date/time
+  DateTime now = RTC.now(); 
+  //writes the current date, time, accelerometer and gyroscope data to SD card
+  myFile = SD.open("telemetry.txt", FILE_WRITE);  
+  // date
+  myFile.print(now.day(), DEC); myFile.print('/');
+  myFile.print(now.month(), DEC); myFile.print('/');
+  myFile.print(now.year(), DEC); myFile.print(','); 
+  myFile.print(' ');
+  // time
+  myFile.print(now.hour(), DEC); myFile.print(':');
+  //inserts a 0 before minutes from 1-9 so that the time displays correctly
+  if (now.minute()<10) {
+    myFile.print('0');
+    myFile.print(now.minute(), DEC);
+  }
+  else {
+    myFile.print(now.minute(), DEC);
+  }
+  myFile.print(',');
+  myFile.print(' ');
+  // accelerometer data
+  myFile.print(accelerationX); myFile.print(','); myFile.print(' ');
+  myFile.print(accelerationY); myFile.print(','); myFile.print(' ');
+  myFile.print(accelerationZ); myFile.print(','); myFile.print(' ');
+  // gyroscope data
+  myFile.print(gyroX); myFile.print(','); myFile.print(' ');
+  myFile.print(gyroY); myFile.print(','); myFile.print(' ');
+  myFile.print(gyroZ); myFile.print(','); myFile.print(' ');
+  // done
+  myFile.println();
+  myFile.close();
+}
