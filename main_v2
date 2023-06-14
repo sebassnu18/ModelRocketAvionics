@@ -1,0 +1,198 @@
+// Final code incorporating mpu, bmp, sd card module, arduino
+//
+
+#include <Wire.h>
+#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP3XX.h>
+#include <SD.h>
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+// MPU variables
+const int MPU = 0x68;
+int16_t rawAcX, rawAcY, rawAcZ, rawGyX, rawGyY, rawGyZ;
+float biasX = 0.0, biasY = 0.0, biasZ = 0.0;
+float calibratedAcX, calibratedAcY, calibratedAcZ, calibratedGyX, calibratedGyY, calibratedGyZ;
+float accelerationX, accelerationY, accelerationZ;
+float gyroX, gyroY, gyroZ;
+
+// Altitude variables
+Adafruit_BMP3XX bmp;
+float initialAltitude = 0.0;  // Variable to store the initial altitude
+bool isCalibrated = false;  // Flag to indicate if calibration is complete
+const float ALTITUDE_THRESHOLD = 25.0f;
+
+// SD card variables
+const int SD_CS_PIN = 4;  // Chip Select (CS) pin for the SD card module
+File dataFile;
+
+// define led pins
+const int red = 8; const int green = 9;
+
+
+void setup() {
+  Wire.begin();
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+  Serial.begin(115200);
+  // set up leds
+  pinMode(red,OUTPUT);
+  pinMode(green,OUTPUT);
+  // indicate that system is not ready yet
+  digitalWrite(red,HIGH);
+  digitalWrite(green,LOW);
+  
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD card initialization failed!");
+    while (1);
+  }
+  
+  if (!bmp.begin_I2C()) {   // hardware I2C mode, can pass in address & alt Wire
+    Serial.println("Could not find a valid BMP3 sensor, check wiring!");
+    while (1);
+  }
+
+  // Set up oversampling and filter initialization
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  // Perform altitude calibration
+  calibrateAltitude();
+}
+
+void loop() {
+    if (!isCalibrated) {
+    calibrateAltitude();
+    return;  // Wait for calibration to complete before proceeding
+  }
+  // indicate that system is ready 
+  digitalWrite(red,LOW);
+  digitalWrite(green,HIGH);
+  readSensors();
+  calibrateValues();
+  scaleAndConvert();
+  writeDataToSDCard();
+  displayData();
+  delay(500);
+}
+
+void calibrateAltitude() {
+  static float prevAltitude = 0.0f;
+  static int stableCount = 0;
+
+  if (bmp.performReading()) {
+    float altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+
+    Serial.print("Current Altitude: ");
+    Serial.println(altitude);
+
+    if (abs(altitude - prevAltitude) <= ALTITUDE_THRESHOLD) {
+      stableCount++;
+    } else {
+      stableCount = 0;
+    }
+
+    prevAltitude = altitude;
+
+    if (stableCount >= 10) {
+      initialAltitude = altitude;
+      isCalibrated = true;
+      Serial.print("Calibration complete. Initial Altitude = ");
+      Serial.print(initialAltitude);
+      Serial.println(" m");
+    }
+  }
+}
+
+
+void readSensors() {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU, 14, true);
+  rawAcX = Wire.read() << 8 | Wire.read();
+  rawAcY = Wire.read() << 8 | Wire.read();
+  rawAcZ = Wire.read() << 8 | Wire.read();
+  Wire.read(); // Skip temperature
+  Wire.read(); // Skip temperature
+  rawGyX = Wire.read() << 8 | Wire.read();
+  rawGyY = Wire.read() << 8 | Wire.read();
+  rawGyZ = Wire.read() << 8 | Wire.read();
+}
+
+void calibrateValues() {
+  calibratedAcX = rawAcX - biasX;
+  calibratedAcY = rawAcY - biasY;
+  calibratedAcZ = rawAcZ - biasZ;
+  calibratedGyX = rawGyX;
+  calibratedGyY = rawGyY;
+  calibratedGyZ = rawGyZ;
+}
+
+void scaleAndConvert() {
+  float accelSensitivity = 2.0 / 32767.0;  // Assuming ±2g full-scale range
+  float gyroSensitivity = 250.0 / 32767.0; // Assuming ±250°/s full-scale range
+  accelerationX = calibratedAcX * accelSensitivity * 9.81;
+  accelerationY = calibratedAcY * accelSensitivity * 9.81;
+  accelerationZ = calibratedAcZ * accelSensitivity * 9.81;
+  gyroX = calibratedGyX * gyroSensitivity;
+  gyroY = calibratedGyY * gyroSensitivity;
+  gyroZ = calibratedGyZ * gyroSensitivity;
+}
+
+void writeDataToSDCard() {
+  dataFile = SD.open("DATA3.txt", FILE_WRITE);
+  if (dataFile) {
+    dataFile.print("Acceleration (m/s²): ");
+    dataFile.print("Xa = ");
+    dataFile.print(accelerationX);
+    dataFile.print(" | Ya = ");
+    dataFile.print(accelerationY);
+    dataFile.print(" | Za = ");
+    dataFile.println(accelerationZ);
+
+    dataFile.print("Gyroscope (°/s): ");
+    dataFile.print("Xg = ");
+    dataFile.print(gyroX);
+    dataFile.print(" | Yg = ");
+    dataFile.print(gyroY);
+    dataFile.print(" | Zg = ");
+    dataFile.println(gyroZ);
+
+    dataFile.print("Calibrated Altitude = ");
+    dataFile.print(String(bmp.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude, 1));
+    dataFile.println(" m");
+
+    dataFile.close();
+  } else {
+    Serial.println("Error writing to data file!");
+  }
+}
+
+void displayData() {
+  Serial.print("Acceleration (m/s²): ");
+  Serial.print("Xa = ");
+  Serial.print(accelerationX);
+  Serial.print(" | Ya = ");
+  Serial.print(accelerationY);
+  Serial.print(" | Za = ");
+  Serial.println(accelerationZ);
+
+  Serial.print("Gyroscope (°/s): ");
+  Serial.print("Xg = ");
+  Serial.print(gyroX);
+  Serial.print(" | Yg = ");
+  Serial.print(gyroY);
+  Serial.print(" | Zg = ");
+  Serial.println(gyroZ);
+
+  Serial.print("Calibrated Altitude = ");
+  Serial.print(String(bmp.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude, 1));
+  Serial.println(" m");
+
+  Serial.println();
+}
