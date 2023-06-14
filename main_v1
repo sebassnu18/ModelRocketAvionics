@@ -1,3 +1,5 @@
+// This code integrates the imu and sd module
+
 // include relevant libraries
 #include <SPI.h>
 #include <SD.h>
