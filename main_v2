@@ -1,4 +1,5 @@
 // Final code incorporating mpu, bmp, sd card module, arduino
+// still need to add the time values to the serial monitor and to the sd card
 
 #include <Wire.h>
 #include <SPI.h>
