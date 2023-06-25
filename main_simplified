@@ -1,0 +1,215 @@
+// this code works with mpu, sd card, altimeter, and arduino, but only gives you the gyroscope and accelerometer values along the z- axis
+
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BMP3XX.h>
+#include <SD.h>
+
+#define SEALEVELPRESSURE_HPA (1013.25)
+
+// MPU variables
+const int MPU = 0x68;
+int16_t rawAcX, rawAcY, rawAcZ, rawGyX, rawGyY, rawGyZ;
+float calibratedAcZ, calibratedGyZ;
+float accelerationZ, gyroZ;
+// MPU calibration variables
+float sumZ = 0;
+float biasZ = 0.0;
+float gyroZSum = 0.0;
+float gyroZBias = 0.0;
+bool isCalibrated_MPU = false;
+// Altitude variables
+Adafruit_BMP3XX bmp;
+float initialAltitude = 0.0;
+const float ALTITUDE_THRESHOLD = 25.0f;
+bool isCalibrated_Alt = false;
+// SD card variables
+const int SD_CS_PIN = 4;
+File dataFile;
+
+// Define LED pins
+const int red = 8;
+const int green = 9;
+
+// Calibration variables
+const int NUM_CALIBRATION_SAMPLES = 1000; 
+
+void setup() {
+  Wire.begin();
+  Wire.beginTransmission(MPU);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+  Serial.begin(115200);
+
+  // Set up LEDs
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+  digitalWrite(red, HIGH);
+  digitalWrite(green, LOW);
+
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD card initialization failed!");
+    while (1);
+  }
+
+  if (!bmp.begin_I2C()) {
+    Serial.println("Could not find a valid BMP3 sensor, check wiring!");
+    while (1);
+  }
+
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  calibrateMPU();
+  calibrateAltitude();
+}
+
+void loop() {
+  
+  if (isCalibrated_MPU == 0) {
+    calibrateMPU();;
+  } else if (isCalibrated_Alt == 0){
+    calibrateAltitude();
+    return;
+  }
+
+  digitalWrite(red, LOW);
+  digitalWrite(green, HIGH);
+
+  readSensors();
+  calibrateValues();
+  scaleAndConvert();
+  writeDataToSDCard();
+  displayData();
+  delay(200);
+}
+
+void calibrateMPU() {
+  Serial.println("Calibrating MPU...");
+  delay(2000); // Allow some time to stabilize
+
+  int32_t sumZ = 0;
+  int32_t gyroZSum = 0;
+
+  for (int i = 0; i < NUM_CALIBRATION_SAMPLES; i++) {
+    readSensors();
+    sumZ += rawAcZ;
+    gyroZSum += rawGyZ;
+    delay(10); // Delay between readings
+  }
+
+  biasZ = (float)sumZ / NUM_CALIBRATION_SAMPLES;
+  gyroZBias = (float)gyroZSum / NUM_CALIBRATION_SAMPLES;
+
+  isCalibrated_MPU = true;
+  Serial.println("MPU calibration complete.");
+
+}
+
+void calibrateAltitude() {
+  Serial.println("Calibrating Altitude...");
+  delay(1000); // Allow some time to stabilize
+  
+  static float prevAltitude = 0.0f;
+  static int stableCount = 0;
+  
+ while(isCalibrated_Alt == 0){
+  if (bmp.performReading()) {
+    float altitude = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+
+    if (abs(altitude - prevAltitude) <= ALTITUDE_THRESHOLD) {
+      stableCount++;
+    } else {
+      stableCount = 0;
+    }
+
+    prevAltitude = altitude;
+
+    if (stableCount >= 10) {
+      initialAltitude = altitude;
+      isCalibrated_Alt = true;
+      Serial.print("Calibration complete.");
+    }
+  }
+}
+}
+
+void readSensors() {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU, 14, true);
+  rawAcX = Wire.read() << 8 | Wire.read();
+  rawAcY = Wire.read() << 8 | Wire.read();
+  rawAcZ = Wire.read() << 8 | Wire.read();
+  Wire.read(); // Skip temperature
+  Wire.read(); // Skip temperature
+  rawGyX = Wire.read() << 8 | Wire.read();
+  rawGyY = Wire.read() << 8 | Wire.read();
+  rawGyZ = Wire.read() << 8 | Wire.read();
+}
+
+void calibrateValues() {
+  calibratedAcZ = rawAcZ - biasZ;
+  calibratedGyZ = rawGyZ - gyroZBias;
+  if(calibratedAcZ<-10){
+    calibratedAcZ = calibratedAcZ - calibratedAcZ/2; // hard coding to correct value
+  }
+}
+
+void scaleAndConvert() {
+  float accelSensitivity = 2.0 / 32767.0;
+  float gyroSensitivity = 250.0 / 32767.0;
+  accelerationZ = calibratedAcZ * accelSensitivity * 9.81;
+  gyroZ = calibratedGyZ * gyroSensitivity;
+}
+
+void writeDataToSDCard() {
+  
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD card initialization failed!");
+    return;
+  }
+
+  dataFile = SD.open("DATA3.txt", FILE_WRITE);
+  
+  if (dataFile) {
+    unsigned long currentTime = millis() / 1000;
+    dataFile.print("Time: ");
+    dataFile.println(currentTime);
+    
+    dataFile.print("Acceleration (m/s²): Za = ");
+    dataFile.println(accelerationZ);
+
+    dataFile.print("Gyroscope (°/s): Roll = ");
+    dataFile.println(gyroZ);
+
+    dataFile.print("Calibrated Altitude = ");
+    dataFile.print(String(bmp.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude, 1));
+    dataFile.println(" m");
+
+    dataFile.close();
+  } else {
+    Serial.println("Error writing to data file!");
+  }
+}
+
+void displayData() {
+  unsigned long currentTime = millis() / 1000;
+  Serial.print("Time (s): ");
+  Serial.println(currentTime);
+  
+  Serial.print("Acceleration (m/s²): Za = ");
+  Serial.println(accelerationZ);
+
+  Serial.print("Gyroscope (°/s): Roll = ");
+  Serial.println(gyroZ);
+
+  Serial.print("Calibrated Altitude = ");
+  Serial.print(String(bmp.readAltitude(SEALEVELPRESSURE_HPA) - initialAltitude, 1));
+  Serial.println(" m");
+
+  Serial.println();
+}
